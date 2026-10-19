@@ -1,0 +1,97 @@
+name: Couchbase Mobile skills - Windows test
+
+# Layer 2 test for the Catalyst hackathon: does the app the couchbase-mobile skills
+# generated build on Windows, and does the Capella setup script survive a default
+# Windows checkout? An Ubuntu job runs the same script checks as a control.
+# No Capella API key is used: the script is run with a dummy key, so the expected
+# good outcome is a clean HTTP 401 from Capella, not a crash before that.
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  windows-build:
+    name: Windows - Gradle build (gradlew.bat)
+    runs-on: windows-latest
+    steps:
+      - name: Use Git for Windows default line endings (like a laptop)
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build debug APK
+        working-directory: InspectionsApp
+        shell: cmd
+        run: gradlew.bat assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: InspectionsApp-debug-apk
+          path: InspectionsApp/app/build/outputs/apk/debug/*.apk
+
+  windows-script:
+    name: Windows - setup-capella.sh checks
+    runs-on: windows-latest
+    steps:
+      - name: Use Git for Windows default line endings (like a laptop)
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v4
+
+      - name: "1. Line endings after checkout"
+        shell: bash
+        working-directory: InspectionsApp
+        run: |
+          for f in setup-capella.sh teardown-capella.sh provision.env; do
+            n=$(grep -c $'\r' "$f" || true)
+            echo "$f: $n lines with CR" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: "2. Is jq available, and does it emit CRLF in Git Bash?"
+        shell: bash
+        continue-on-error: true
+        run: |
+          which jq && jq --version || { echo "jq NOT installed" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+          id=$(echo '{"id":"abc123"}' | jq -r .id)
+          printf 'jq -r output = %q\n' "$id" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$id" == "abc123" ]] || { echo "FAIL: jq output carries a CR" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: "3. Git Bash: source provision.env && ./setup-capella.sh (dummy key)"
+        shell: bash
+        continue-on-error: true
+        working-directory: InspectionsApp
+        run: |
+          set +e
+          ( source provision.env && export CB_API_KEY='dummy-key-for-ci' && timeout 180 ./setup-capella.sh ) > run.log 2>&1
+          echo "exit code: $?" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; head -40 run.log | tee -a "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "4. PowerShell 7: the README command as typed"
+        shell: pwsh
+        continue-on-error: true
+        working-directory: InspectionsApp
+        run: |
+          try { source provision.env; "source worked" } catch { "source FAILED in PowerShell: $($_.Exception.Message)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY; exit 1 }
+
+      - name: "5. Windows PowerShell 5.1: what does 'curl' mean? (seed-data step)"
+        shell: powershell
+        run: |
+          $c = Get-Command curl
+          "curl in Windows PowerShell 5.1 resolves to: $($c.CommandType) $($c.Name) $($c.Definition)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+  ubuntu-control:
+    name: Ubuntu control - setup-capella.sh (dummy key)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run setup-capella.sh with dummy key
+        shell: bash
+        continue-on-error: true
+        working-directory: InspectionsApp
+        run: |
+          set +e
+          ( source provision.env && export CB_API_KEY='dummy-key-for-ci' && timeout 180 ./setup-capella.sh ) > run.log 2>&1
+          echo "exit code: $?" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; head -40 run.log | tee -a "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
